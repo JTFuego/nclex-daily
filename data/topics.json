@@ -1,0 +1,12 @@
+[
+  { "id": "fundamentals", "name": "Fundamentals" },
+  { "id": "pharmacology", "name": "Pharmacology" },
+  { "id": "med-surg", "name": "Med-Surg" },
+  { "id": "cardiac", "name": "Cardiac" },
+  { "id": "respiratory", "name": "Respiratory" },
+  { "id": "fluids-electrolytes", "name": "Fluids & Electrolytes" },
+  { "id": "maternity", "name": "Maternity" },
+  { "id": "pediatrics", "name": "Pediatrics" },
+  { "id": "mental-health", "name": "Mental Health" },
+  { "id": "leadership", "name": "Leadership & Prioritization" }
+]
