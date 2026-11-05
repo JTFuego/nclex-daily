@@ -1,7 +1,22 @@
 // Starts the app, loads the questions, and draws the home and results screens.
 
-import { h, show } from './ui.js';
-import { load, save, saveFailed, exportBackup, importBackup } from './storage.js';
+import { h, svg, show } from './ui.js';
+import { setupThemeToggle } from './theme.js';
+import { isConfigured } from './firebase-config.js';
+import {
+  load,
+  save,
+  saveFailed,
+  connect,
+  disconnect,
+  exportBackup,
+  importBackup,
+  legacySummary,
+  shouldOfferImport,
+  declineImport,
+  importLegacy,
+  forgetLegacy,
+} from './storage.js';
 import { toDateKey, addDays, formatDate } from './dates.js';
 import { pickSet } from './selector.js';
 import { runQuiz } from './quiz.js';
@@ -12,10 +27,52 @@ const DAILY_COUNT = 20;
 const EXTRA_COUNT = 10;
 const CHART_DAYS = 14;
 
+// Topic status flags: under WEAK_BELOW is red, under STRONG_FROM is yellow, the rest green.
+const WEAK_BELOW = 65;
+const STRONG_FROM = 80;
+
 const root = document.getElementById('app');
+const tabsNav = document.getElementById('tabs');
 let topics = [];
 let questionsById = new Map();
 let onHome = false;
+let activeTab = 'today';
+let cloud = null; // loaded in start(), so a blocked connection can show a clear message
+let currentUser = null;
+const FLASH_KEY = 'nursing-study-flash';
+
+/* ---------- Chart header and tabs ---------- */
+
+function updateHeader() {
+  const today = toDateKey();
+  const streak = currentStreak(load().days, today);
+  const label = `${streak} ${streak === 1 ? 'day' : 'days'}`;
+  document.getElementById('chart-date').textContent = formatDate(today, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+  document.getElementById('chart-streak-count').textContent = label;
+  const box = document.getElementById('chart-streak');
+  box.hidden = !currentUser;
+  box.classList.toggle('is-active', streak > 0);
+  box.setAttribute('aria-label', `Current streak: ${label}`);
+}
+
+// Tabs stay hidden during a quiz and on results, so a set can't be left by accident.
+function leaveHome() {
+  onHome = false;
+  tabsNav.hidden = true;
+  updateHeader();
+}
+
+tabsNav.addEventListener('click', (event) => {
+  const tab = event.target.closest('[data-tab]');
+  if (!tab) return;
+  activeTab = tab.dataset.tab;
+  drawHome();
+});
 
 const topicName = (id) => topics.find((t) => t.id === id)?.name ?? id;
 
@@ -68,7 +125,7 @@ function startDaily(startIndex) {
     save();
   }
   const day = data.days[today];
-  onHome = false;
+  leaveHome();
   runQuiz({
     root,
     questions: questionsFor(day.ids),
@@ -82,6 +139,7 @@ function startDaily(startIndex) {
       if (finished && !day.completedAt) {
         day.completedAt = Date.now();
         save();
+        updateHeader();
       }
     },
     onSaveProgress: save,
@@ -106,7 +164,7 @@ function startExtra() {
   });
   const questions = questionsFor(ids);
   const results = new Map();
-  onHome = false;
+  leaveHome();
   runQuiz({
     root,
     questions,
@@ -160,7 +218,7 @@ function drawResults(date) {
     if (a.date === date && a.mode === 'daily') latest.set(a.id, a);
   }
   const streak = currentStreak(data.days, toDateKey());
-  onHome = false;
+  leaveHome();
   show(
     root,
     h(
@@ -194,7 +252,7 @@ function drawExtraResults(questions, results) {
   const answered = questions.filter((q) => results.has(q.id));
   const total = answered.reduce((sum, q) => sum + credit(results.get(q.id)), 0);
   const percent = answered.length ? Math.round((total / answered.length) * 100) : 0;
-  onHome = false;
+  leaveHome();
   show(
     root,
     h(
@@ -215,38 +273,72 @@ function drawExtraResults(questions, results) {
 
 /* ---------- Home ---------- */
 
+function progressRing(answered, total) {
+  const percent = total ? (answered / total) * 100 : 0;
+  const circle = { cx: 60, cy: 60, r: 52, fill: 'none', 'stroke-width': 12 };
+  return h(
+    'div',
+    { class: 'ring', role: 'img', 'aria-label': `${answered} of ${total} questions answered` },
+    svg(
+      'svg',
+      { viewBox: '0 0 120 120', 'aria-hidden': 'true' },
+      svg('circle', { ...circle, class: 'ring-track' }),
+      answered > 0
+        ? svg('circle', {
+            ...circle,
+            class: 'ring-fill',
+            pathLength: 100,
+            'stroke-dasharray': `${percent} 100`,
+            'stroke-linecap': 'round',
+            transform: 'rotate(-90 60 60)',
+          })
+        : '',
+    ),
+    h(
+      'div',
+      { class: 'ring-label', 'aria-hidden': 'true' },
+      h('span', { class: 'ring-count' }, `${answered}/${total}`),
+      h('span', { class: 'ring-caption' }, answered === total ? 'done' : 'answered'),
+    ),
+  );
+}
+
 function todayCard(data, today) {
   const day = data.days[today];
-  if (!day) {
-    return h(
+  const questions = day ? questionsFor(day.ids) : [];
+  const answered = questions.filter((q) => isComplete(q, day.responses[q.id])).length;
+  const total = day ? questions.length : DAILY_COUNT;
+
+  const panel = (title, ...details) =>
+    h(
       'section',
       { class: 'card today' },
-      h('h2', {}, "Today's set"),
+      h('h2', {}, title),
+      h(
+        'div',
+        { class: 'today-body' },
+        progressRing(answered, total),
+        h('div', { class: 'today-details' }, details),
+      ),
+    );
+
+  if (!day) {
+    return panel(
+      "Today's set",
       h('p', { class: 'muted' }, `${DAILY_COUNT} questions, weighted toward your weak topics.`),
       h('button', { type: 'button', class: 'button-primary button-wide', onclick: () => startDaily() }, 'Start today’s set'),
     );
   }
-  const questions = questionsFor(day.ids);
-  const answered = questions.filter((q) => isComplete(q, day.responses[q.id])).length;
   if (!day.completedAt) {
-    return h(
-      'section',
-      { class: 'card today' },
-      h('h2', {}, "Today's set"),
-      h('p', { class: 'muted' }, `${answered} of ${questions.length} answered. Finish all ${questions.length} to keep your streak.`),
-      h(
-        'div',
-        { class: 'quiz-progress' },
-        h('div', { class: 'quiz-progress-fill', style: `width:${(answered / questions.length) * 100}%` }),
-      ),
+    return panel(
+      "Today's set",
+      h('p', { class: 'muted' }, `${answered} of ${total} answered. Finish all ${total} to keep your streak.`),
       h('button', { type: 'button', class: 'button-primary button-wide', onclick: () => startDaily() }, answered ? 'Continue' : 'Start today’s set'),
     );
   }
   const score = dayScore(day, data.attempts, today);
-  return h(
-    'section',
-    { class: 'card today' },
-    h('h2', {}, "Today's set is done ✓"),
+  return panel(
+    "Today's set is done ✓",
     h('p', { class: 'muted' }, `You scored ${score.percent}%, with ${score.fullyCorrect} of ${score.answered} fully correct.`),
     h(
       'div',
@@ -353,39 +445,160 @@ function scoreChart(data, today) {
   );
 }
 
-function topicChart(data) {
+function topicFlag(percent) {
+  if (percent === null) return { level: 'none', label: 'No data' };
+  if (percent < WEAK_BELOW) return { level: 'weak', label: 'Weak' };
+  if (percent < STRONG_FROM) return { level: 'fair', label: 'Fair' };
+  return { level: 'strong', label: 'Strong' };
+}
+
+function topicTable(data) {
   const rows = topicAccuracy(topics, data.attempts);
   return h(
     'section',
     { class: 'card' },
     h('h2', {}, 'Accuracy by topic'),
-    h('p', { class: 'muted chart-subtitle' }, 'Weakest first. Weak topics appear more often in your sets.'),
     h(
-      'ul',
-      { class: 'bars' },
-      rows.map((row) =>
+      'p',
+      { class: 'muted chart-subtitle' },
+      `Weakest first. Weak topics appear more often in your sets. Weak is under ${WEAK_BELOW}%, Fair is ${WEAK_BELOW}–${STRONG_FROM - 1}%, and Strong is ${STRONG_FROM}% or higher.`,
+    ),
+    h(
+      'table',
+      { class: 'topic-table' },
+      h(
+        'thead',
+        {},
         h(
-          'li',
-          { class: 'bar-row' },
-          h('span', { class: 'bar-label' }, row.name),
-          h(
-            'div',
-            {
-              class: 'bar-track',
-              'aria-hidden': 'true',
-            },
-            row.percent !== null ? h('div', { class: 'bar-fill', style: `width:${row.percent}%` }) : null,
-          ),
-          h(
-            'span',
-            { class: 'bar-value' },
-            row.percent !== null ? `${row.percent}%` : 'No data',
-            row.percent !== null ? h('span', { class: 'bar-count' }, ` (${row.attempts})`) : null,
-          ),
+          'tr',
+          {},
+          h('th', { scope: 'col' }, 'Topic'),
+          h('th', { scope: 'col', class: 'cell-number' }, 'Accuracy'),
+          h('th', { scope: 'col' }, 'Status'),
         ),
+      ),
+      h(
+        'tbody',
+        {},
+        rows.map((row) => {
+          const flag = topicFlag(row.percent);
+          return h(
+            'tr',
+            {},
+            h(
+              'td',
+              {},
+              h('span', { class: 'topic-name' }, row.name),
+              h('span', { class: 'topic-count' }, `${row.attempts} answered`),
+            ),
+            h('td', { class: 'cell-number' }, row.percent !== null ? `${row.percent}%` : '–'),
+            h(
+              'td',
+              {},
+              h(
+                'span',
+                { class: `flag flag-${flag.level}` },
+                h('span', { class: 'flag-dot', 'aria-hidden': 'true' }),
+                flag.label,
+              ),
+            ),
+          );
+        }),
       ),
     ),
   );
+}
+
+function accountCard() {
+  const message = h('p', { class: 'banner banner-bad', role: 'alert', hidden: true });
+  const showError = (text) => {
+    message.textContent = text;
+    message.hidden = false;
+  };
+  return h(
+    'section',
+    { class: 'card' },
+    h('h2', {}, 'Account'),
+    h(
+      'p',
+      {},
+      h('span', { class: 'account-name' }, currentUser.name ?? 'Signed in'),
+      h('span', { class: 'muted account-email' }, currentUser.email ?? ''),
+    ),
+    h('p', { class: 'muted' }, 'Your progress syncs automatically on every device where you sign in.'),
+    h(
+      'div',
+      { class: 'button-row' },
+      h('button', { type: 'button', class: 'button-secondary', onclick: () => handleSignOut(showError) }, 'Sign out'),
+      h('button', { type: 'button', class: 'button-danger', onclick: () => handleDelete(showError) }, 'Delete my data'),
+    ),
+    message,
+  );
+}
+
+async function finishAndReload() {
+  await cloud.signOutAndClear();
+  location.reload();
+}
+
+async function handleSignOut(showError) {
+  const synced = await cloud.allSynced(4000);
+  if (
+    !synced &&
+    !window.confirm('Some recent answers have not reached the cloud yet, and signing out now would lose them. Sign out anyway?')
+  ) {
+    return;
+  }
+  try {
+    disconnect();
+    await finishAndReload();
+  } catch (error) {
+    console.error(error);
+    showError('Could not sign out. Reload the page and try again.');
+  }
+}
+
+async function handleDelete(showError) {
+  if (!navigator.onLine) {
+    showError('You need to be online to delete your data.');
+    return;
+  }
+  if (
+    !window.confirm('Permanently delete all your progress and your sign-in record? This cannot be undone. Google will ask you to confirm your account next.')
+  ) {
+    return;
+  }
+  const { uid } = currentUser;
+  try {
+    await cloud.confirmIdentity();
+  } catch (error) {
+    console.error(error);
+    showError('Your data was not deleted, because Google could not confirm your account. Try again.');
+    return;
+  }
+  try {
+    await cloud.allSynced(4000); // so a waiting answer can't reappear after the delete
+    disconnect();
+    await cloud.deleteAllDays(uid);
+  } catch (error) {
+    console.error(error);
+    showError('Deleting did not finish, so some progress may remain. Reload the page and try again.');
+    return;
+  }
+  forgetLegacy(uid);
+  let notice = 'Your progress and sign-in record were deleted.';
+  try {
+    await cloud.deleteSignInRecord();
+  } catch (error) {
+    console.error(error);
+    notice = 'Your progress was deleted, but your sign-in record could not be removed. Sign in, delete your data again, or contact the person who runs this app.';
+  }
+  try {
+    sessionStorage.setItem(FLASH_KEY, notice);
+  } catch (error) {
+    console.warn(error);
+  }
+  await finishAndReload();
 }
 
 function backupCard() {
@@ -416,54 +629,206 @@ function backupCard() {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    message.textContent = 'Backup saved. Open it on your other device with Merge a backup.';
+    message.textContent = 'Backup saved to your downloads.';
   };
   return h(
     'section',
     { class: 'card' },
-    h('h2', {}, 'Backup and sync'),
+    h('h2', {}, 'Backup (optional)'),
     h(
       'p',
       { class: 'muted' },
-      'Progress is saved only in this browser, and browsers can clear it. Save a backup weekly, or use one to move progress between your phone and laptop. Merging keeps the answers from both devices.',
+      'You no longer need backups to move between devices. You can still save a personal copy of your progress, or merge a backup file you saved earlier into this account.',
     ),
     h(
       'div',
       { class: 'button-row' },
       h('button', { type: 'button', class: 'button-secondary', onclick: download }, 'Save a backup'),
       h('button', { type: 'button', class: 'button-secondary', onclick: () => fileInput.click() }, 'Merge a backup'),
+      legacySummary()
+        ? h(
+            'button',
+            {
+              type: 'button',
+              class: 'button-secondary',
+              onclick: () => {
+                importLegacy(currentUser.uid);
+                drawHome();
+              },
+            },
+            'Import from this browser',
+          )
+        : null,
     ),
     fileInput,
     message,
   );
 }
 
+const tabPanels = {
+  today: (data, today) => [todayCard(data, today)],
+  progress: (data, today) => [statTiles(data, today), scoreChart(data, today), accountCard(), backupCard()],
+  topics: (data) => [topicTable(data)],
+};
+
 function drawHome() {
   onHome = true;
   const data = load();
   const today = toDateKey();
+  updateHeader();
+  tabsNav.hidden = false;
+  for (const tab of tabsNav.querySelectorAll('[data-tab]')) {
+    if (tab.dataset.tab === activeTab) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  show(
+    root,
+    saveFailed()
+      ? h('p', { class: 'banner banner-bad' }, 'Your progress could not reach the cloud, so recent answers may not be saved. Reload the page, and sign in again if asked.')
+      : null,
+    tabPanels[activeTab](data, today),
+  );
+}
+
+/* ---------- Welcome and first sign-in ---------- */
+
+function signInMessage(error) {
+  switch (error.code) {
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return null;
+    case 'auth/popup-blocked':
+      return 'Your browser blocked the sign-in window. Allow pop-ups for this site and try again. On an iPhone Home Screen icon, open the site in Safari instead.';
+    case 'auth/unauthorized-domain':
+      return 'This web address is not on the app’s approved list yet. SETUP.md explains how to add it.';
+    case 'auth/network-request-failed':
+      return 'Could not reach Google. Check your connection and try again.';
+    default:
+      return 'Sign-in did not work. Please try again.';
+  }
+}
+
+function takeFlash() {
+  try {
+    const text = sessionStorage.getItem(FLASH_KEY);
+    sessionStorage.removeItem(FLASH_KEY);
+    return text;
+  } catch {
+    return null;
+  }
+}
+
+function drawWelcome() {
+  leaveHome();
+  const flash = takeFlash();
+  const message = h('p', { class: 'banner banner-bad', role: 'alert', hidden: true });
+  const button = h(
+    'button',
+    {
+      type: 'button',
+      class: 'button-primary button-wide',
+      onclick: async () => {
+        message.hidden = true;
+        button.disabled = true;
+        try {
+          await cloud.signIn();
+        } catch (error) {
+          console.error(error);
+          const text = signInMessage(error);
+          if (text) {
+            message.textContent = text;
+            message.hidden = false;
+          }
+          button.disabled = false;
+        }
+      },
+    },
+    'Sign in with Google',
+  );
+  show(
+    root,
+    flash ? h('p', { class: 'banner banner-good', role: 'status' }, flash) : null,
+    h(
+      'section',
+      { class: 'card welcome' },
+      h('h1', {}, 'Welcome to NCLEX Daily'),
+      h('p', { class: 'muted' }, '20 NCLEX-style practice questions a day, with rationales and more practice on your weak topics. Your progress follows you to every device.'),
+      button,
+      message,
+    ),
+  );
+}
+
+function drawImportOffer() {
+  leaveHome();
+  const { answers, days } = legacySummary();
+  const finish = () => {
+    activeTab = 'today';
+    drawHome();
+  };
   show(
     root,
     h(
-      'header',
-      { class: 'app-header' },
-      h('h1', {}, 'NCLEX Daily'),
-      h('p', { class: 'muted' }, formatDate(today, { weekday: 'long', month: 'long', day: 'numeric' })),
-    ),
-    saveFailed()
-      ? h('p', { class: 'banner banner-bad' }, 'Your browser blocked saving, so recent answers may be lost. Check for Private Browsing or full storage.')
-      : null,
-    todayCard(data, today),
-    statTiles(data, today),
-    scoreChart(data, today),
-    topicChart(data),
-    backupCard(),
-    h(
-      'p',
-      { class: 'disclaimer' },
-      'Personal study aid. Questions are original practice items not reviewed by a nursing educator. Check anything doubtful against your course materials and follow your program and facility policies.',
+      'section',
+      { class: 'card' },
+      h('h2', {}, 'Bring your progress with you?'),
+      h(
+        'p',
+        {},
+        `This browser has ${answers} ${answers === 1 ? 'answer' : 'answers'} from ${days} ${days === 1 ? 'day' : 'days'}, saved before you had an account. Import it only if it's yours, and it will sync to this account.`,
+      ),
+      h(
+        'div',
+        { class: 'button-row' },
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'button-secondary',
+            onclick: () => {
+              declineImport(currentUser.uid);
+              finish();
+            },
+          },
+          'Not now',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'button-primary',
+            onclick: () => {
+              importLegacy(currentUser.uid);
+              finish();
+            },
+          },
+          'Import my progress',
+        ),
+      ),
+      h('p', { class: 'muted' }, 'If you choose Not now, you can import later from the Progress tab.'),
     ),
   );
+}
+
+async function handleUserChange(user) {
+  currentUser = user;
+  if (!user) {
+    disconnect();
+    drawWelcome();
+    return;
+  }
+  leaveHome();
+  show(root, h('p', { class: 'muted' }, 'Loading your progress…'));
+  await connect(cloud, user.uid, () => {
+    if (onHome) drawHome();
+  });
+  if (currentUser?.uid !== user.uid) return; // signed out while loading
+  if (shouldOfferImport(user.uid)) {
+    drawImportOffer();
+    return;
+  }
+  activeTab = 'today';
+  drawHome();
 }
 
 // If the app was left open overnight, show the new day when you come back.
@@ -471,14 +836,40 @@ let shownDate = toDateKey();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   const today = toDateKey();
-  if (today !== shownDate && onHome) drawHome();
+  if (today !== shownDate) {
+    if (onHome) drawHome();
+    else updateHeader();
+  }
   shownDate = today;
 });
 
+const syncStatus = document.getElementById('sync-status');
+const updateConnection = () => {
+  syncStatus.hidden = navigator.onLine;
+};
+window.addEventListener('online', updateConnection);
+window.addEventListener('offline', updateConnection);
+updateConnection();
+
 async function start() {
+  setupThemeToggle(document.getElementById('theme-toggle'));
+  updateHeader();
+  if (!isConfigured) {
+    show(
+      root,
+      h(
+        'section',
+        { class: 'card' },
+        h('h2', {}, 'One setup step left'),
+        h('p', { class: 'muted' }, 'This app isn’t connected to Firebase yet. Follow SETUP.md, then paste your settings into js/firebase-config.js.'),
+      ),
+    );
+    return;
+  }
   try {
     await loadQuestions();
-    drawHome();
+    cloud = await import('./cloud.js');
+    cloud.onUserChange(handleUserChange);
   } catch (error) {
     console.error(error);
     show(

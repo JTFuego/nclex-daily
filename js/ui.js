@@ -18,6 +18,14 @@ export function h(tag, attrs = {}, ...children) {
   return element;
 }
 
+// The same idea for SVG graphics, which browsers create differently.
+export function svg(tag, attrs = {}, ...children) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [name, value] of Object.entries(attrs)) element.setAttribute(name, value);
+  element.append(...children);
+  return element;
+}
+
 export function show(root, ...children) {
   root.replaceChildren(...children.flat().filter(Boolean));
   window.scrollTo(0, 0);

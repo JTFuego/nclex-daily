@@ -1,6 +1,6 @@
 # NCLEX Daily
 
-A personal NCLEX-RN study app: 20 practice questions a day, with rationales, progress tracking, and more practice on weak topics. It runs entirely in the browser, with no accounts or paid services.
+An NCLEX-RN study app: 20 practice questions a day, with rationales, progress tracking, and more practice on weak topics. People sign in with Google, and each person's progress syncs across their devices using Firebase's free plan. **To connect it to Firebase, follow [SETUP.md](SETUP.md).**
 
 The questions are original practice items and have not been reviewed by a nursing educator. If something conflicts with your course materials, trust your course and fix the question.
 
@@ -12,7 +12,7 @@ Open Terminal in this folder and run:
 ruby -run -e httpd . -p 8000
 ```
 
-Then go to <http://localhost:8000>. Press Control-C in Terminal to stop it. Double-clicking `index.html` won't work, because browsers block this kind of app from loading local files directly.
+Then go to <http://localhost:8000>. Signing in here requires `localhost` on your Firebase authorized domains list. Press Control-C in Terminal to stop it. Double-clicking `index.html` won't work, because browsers block this kind of app from loading local files directly.
 
 ## Project layout
 
@@ -26,12 +26,17 @@ js/
   scoring.js            how each question type is graded
   selector.js           picks questions and favors weak topics
   progress.js           score per day, streak, accuracy by topic
-  storage.js            the only file that touches browser storage
+  storage.js            holds your progress and keeps it in sync
+  cloud.js              the only file that talks to Firebase
+  firebase-config.js    your Firebase project's public settings
+  theme.js              the light/dark toggle
   dates.js, ui.js       small helpers
 data/
   topics.json           master topic list
   questions/            one file per topic
 tests/                  open /tests/ in the browser to check everything
+firestore.rules         who can read and write data; paste into the Firebase console
+SETUP.md                step-by-step Firebase setup and second-account testing
 ```
 
 ## Add or fix a question
@@ -62,7 +67,11 @@ To add a new topic, add it to `data/topics.json` and create `data/questions/<top
 
 ## Your data
 
-Progress is stored only in the browser you use, so your phone and laptop keep separate records. Clearing browser data erases it, and Safari can clear it after about 7 days without a visit. Use **Save a backup** on the home screen regularly. **Merge a backup** on another device combines both devices' answers.
+Each person's progress is stored in Firestore at `users/{their user ID}/days/{date}`, and `firestore.rules` limits it to that person. Your streak, daily scores, and topic accuracy are calculated from your saved answers, so they can't disagree. Name and email stay in Firebase Authentication and aren't copied into the database.
+
+Answers given during a brief connection drop wait on the device and sync when it returns. **Save a backup** and **Merge a backup** on the Progress tab are optional. **Delete my data** removes a person's progress and sign-in record.
+
+If you change `firestore.rules`, paste the new version into the Firebase console, since uploading the file to GitHub doesn't apply it. Never add a service account key to this project.
 
 ## Ideas for later versions
 
@@ -70,4 +79,4 @@ The structure leaves room for these, none of which is built yet:
 
 - **Study modules:** add `data/modules/`, using the same topic IDs, so a missed question can link to its lesson.
 - **Diagrams:** add an `assets/` folder and an optional `image` field on questions and modules.
-- **AI tutor:** add `js/tutor.js`, which can read your progress through `storage.js`. It would need a small server to keep an API key private, so it can't run on GitHub Pages alone.
+- **AI tutor:** add `js/tutor.js`, which can read your progress through `storage.js`. It would need a server component to keep an API key private, so it can't run on GitHub Pages alone.

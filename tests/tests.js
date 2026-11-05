@@ -5,7 +5,7 @@ import { grade, isComplete, credit } from '../js/scoring.js';
 import { addDays, daysBetween } from '../js/dates.js';
 import { currentStreak, longestStreak, dayScore, topicAccuracy } from '../js/progress.js';
 import { pickSet } from '../js/selector.js';
-import { mergeData } from '../js/storage.js';
+import { mergeData, dayToDoc, applyDoc, removeDay } from '../js/storage.js';
 
 const failures = [];
 let passed = 0;
@@ -293,6 +293,72 @@ function checkMerge() {
   check('merge: unfinished day never replaces finished', current.days['2026-11-01'].completedAt === 9);
 }
 
+/* ---------- Cloud documents ---------- */
+
+// Firestore rejects undefined values and lists directly inside lists.
+function firestoreProblem(value) {
+  if (value === undefined) return 'undefined value';
+  if (Array.isArray(value)) {
+    if (value.some(Array.isArray)) return 'list inside a list';
+    return value.map(firestoreProblem).find(Boolean) ?? null;
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value).map(firestoreProblem).find(Boolean) ?? null;
+  }
+  return null;
+}
+
+function checkCloudDocs(questions) {
+  const date = '2026-11-04';
+  const empty = () => ({ version: 1, days: {}, attempts: [] });
+  const attempt = (id, at) => ({ id, topic: 't', date, at, earned: 1, possible: 2, mode: 'daily' });
+
+  const responses = Object.fromEntries(questions.map((q) => [q.id, perfectResponse(q)]));
+  const source = {
+    version: 1,
+    days: { [date]: { ids: questions.map((q) => q.id), responses, completedAt: null } },
+    attempts: [attempt('a', 1), attempt('b', 2)],
+  };
+  const cloudDoc = dayToDoc(source, date);
+  check(`cloud doc: every question type is storable (${firestoreProblem(cloudDoc)})`, !firestoreProblem(cloudDoc));
+  check('cloud doc: no completedAt until finished', !('completedAt' in cloudDoc));
+
+  const copy = empty();
+  applyDoc(copy, date, cloudDoc);
+  check('cloud doc: answers survive the round trip', same(copy.days[date].responses, responses));
+  check(
+    'cloud doc: attempts survive with their date',
+    same(dayToDoc(copy, date).attempts, cloudDoc.attempts) && copy.attempts.every((a) => a.date === date),
+  );
+
+  applyDoc(copy, date, cloudDoc);
+  check('cloud doc: applying twice adds nothing', copy.attempts.length === 2);
+
+  const heldByQuiz = copy.days[date].responses;
+  applyDoc(copy, date, { ids: ['x'], responses: { x: '1' }, attempts: { x_3: { ...attempt('x', 3), date: undefined } } });
+  check('cloud doc: an open quiz keeps seeing updates', heldByQuiz.x === 1);
+  check('cloud doc: a second device adds its attempts', copy.attempts.length === 3);
+
+  copy.days[date].completedAt = 9;
+  applyDoc(copy, date, { ids: ['x'] });
+  check('cloud doc: a stale device cannot unfinish a day', copy.days[date].completedAt === 9);
+
+  removeDay(copy, date);
+  check('cloud doc: deleting removes the day and its attempts', !copy.days[date] && copy.attempts.length === 0);
+
+  const attemptsOnly = { version: 1, days: {}, attempts: [attempt('a', 1)] };
+  const doc2 = dayToDoc(attemptsOnly, date);
+  check('cloud doc: attempts without a set have no ids', !('ids' in doc2) && !!doc2.attempts);
+  const restored = empty();
+  applyDoc(restored, date, doc2);
+  check('cloud doc: attempts without a set create no day', !restored.days[date] && restored.attempts.length === 1);
+
+  const bad = { version: 1, days: { nope: { ids: [], responses: {} } }, attempts: [{ id: 'a', at: 1, date: 'bad/path' }] };
+  const target = empty();
+  mergeData(target, bad);
+  check('merge: invalid dates are rejected', target.attempts.length === 0 && !target.days.nope);
+}
+
 /* ---------- Run ---------- */
 
 async function run() {
@@ -308,6 +374,7 @@ async function run() {
     checkProgress();
     checkSelector(topics, questions);
     checkMerge();
+    checkCloudDocs(questions);
 
     const counts = (key) =>
       Object.entries(

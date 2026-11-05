@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Each signed-in person can read and write only their own progress.
+// Anything not matched below is denied by default.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/days/{date} {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == uid;
+      }
+
+      function isValidDay() {
+        let day = request.resource.data;
+        return date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && day.keys().hasOnly(['ids', 'responses', 'completedAt', 'attempts'])
+          && (!('ids' in day) || day.ids is list)
+          && (!('responses' in day) || day.responses is map)
+          && (!('completedAt' in day) || day.completedAt is number)
+          && (!('attempts' in day) || day.attempts is map);
+      }
+
+      allow read, delete: if isOwner();
+      allow create, update: if isOwner() && isValidDay();
+    }
+  }
+}
