@@ -64,6 +64,30 @@ export function topicAccuracy(topics, attempts) {
     .sort((a, b) => (a.percent ?? 101) - (b.percent ?? 101));
 }
 
+// Accuracy for a list of tags, in the list's order. `tagOf` gives an attempt's tag,
+// so older answers count as soon as their question is tagged.
+export function tagAccuracy(tags, attempts, tagOf) {
+  const rows = new Map(tags.map((tag) => [tag.id, { ...tag, attempts: 0, missed: 0, total: 0, percent: null }]));
+  for (const attempt of attempts) {
+    const row = rows.get(tagOf(attempt));
+    if (!row) continue;
+    const value = credit(attempt);
+    row.attempts += 1;
+    row.total += value;
+    if (value < 1) row.missed += 1;
+  }
+  for (const row of rows.values()) {
+    if (row.attempts) row.percent = Math.round((row.total / row.attempts) * 100);
+  }
+  return [...rows.values()];
+}
+
+// The row you do worst in, ignoring rows with too few answers to mean much.
+export function weakestRow(rows, minimumAttempts) {
+  const eligible = rows.filter((row) => row.attempts >= minimumAttempts);
+  return eligible.reduce((worst, row) => (!worst || row.percent < worst.percent ? row : worst), null);
+}
+
 // Recent accuracy for choosing questions, pulled toward PRIOR_ACCURACY so that
 // one unlucky answer doesn't flood the next set with that topic.
 export function weaknessScores(topics, attempts) {

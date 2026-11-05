@@ -708,6 +708,61 @@ select {
   background: var(--flag-none);
 }
 
+/* Test plan and clinical judgment rows */
+.tag-group {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+
+.tag-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tag-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.tag-rows:last-child .tag-row:last-child {
+  border-bottom: 0;
+}
+
+.tag-row-percent {
+  min-width: 2.8em;
+  text-align: right;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.tag-row.is-empty .topic-name,
+.tag-row.is-empty .tag-row-percent {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.button-small {
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button-small:hover {
+  background: var(--surface-2);
+}
+
 .backup-message:empty {
   display: none;
 }
@@ -846,6 +901,50 @@ select {
   font-size: 0.75rem;
   color: var(--muted);
   text-align: center;
+}
+
+/* Confidence buttons, which also submit the answer */
+.confidence {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.confidence-label {
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.confidence-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.confidence-button {
+  min-height: 50px;
+  padding: 8px 4px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.95rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.confidence-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.confidence-button:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 /* Choices: single answer, select all, bowtie */

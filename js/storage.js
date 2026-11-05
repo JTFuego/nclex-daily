@@ -13,8 +13,9 @@
 //     }
 //   },
 //   attempts: [
-//     { id, topic, date, at, earned, possible, mode }   mode: "daily" | "extra"
-//   ]
+//     { id, topic, date, at, earned, possible, mode,   mode: "daily" | "extra"
+//       timeMs, confidence }                           optional; older answers lack them
+//   ]                                                  confidence: "guess" | "unsure" | "sure"
 // }
 //
 // In the cloud, each date is one document (see dayToDoc). Your streak, daily
@@ -84,8 +85,12 @@ export function dayToDoc(source, date) {
   const attempts = {};
   for (const attempt of source.attempts) {
     if (attempt.date !== date) continue;
-    const { id, topic, at, earned, possible, mode } = attempt;
-    attempts[attemptKey(attempt)] = { id, topic, at, earned, possible, mode };
+    const { id, topic, at, earned, possible, mode, timeMs, confidence } = attempt;
+    const saved = { id, topic, at, earned, possible, mode };
+    // Left out when unknown, because Firestore rejects undefined values.
+    if (timeMs !== undefined) saved.timeMs = timeMs;
+    if (confidence !== undefined) saved.confidence = confidence;
+    attempts[attemptKey(attempt)] = saved;
   }
   if (Object.keys(attempts).length) result.attempts = attempts;
   return result;

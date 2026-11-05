@@ -5,6 +5,71 @@ import { h, show } from './ui.js';
 import { grade, isComplete, credit } from './scoring.js';
 import { renderQuestionBody, typeHints, typeNames } from './question-types.js';
 
+// Ordered from least to most sure. Saved with each answer as `confidence`.
+const CONFIDENCE_LEVELS = [
+  { value: 'guess', label: 'Guessing' },
+  { value: 'unsure', label: 'Unsure' },
+  { value: 'sure', label: 'Sure' },
+];
+
+function lowestConfidence(values) {
+  const order = CONFIDENCE_LEVELS.map((level) => level.value);
+  return order.find((value) => values.includes(value));
+}
+
+// Tapping a level submits the answer, so rating it takes one tap and always
+// happens before you can see whether you were right.
+function confidencePicker(onPick) {
+  const buttons = CONFIDENCE_LEVELS.map(({ value, label }) =>
+    h(
+      'button',
+      { type: 'button', class: 'confidence-button', disabled: true, onclick: () => onPick(value) },
+      label,
+    ),
+  );
+  return {
+    element: h(
+      'div',
+      { class: 'confidence' },
+      h('p', { class: 'confidence-label' }, 'Answer, then tap how sure you are to submit:'),
+      h('div', { class: 'confidence-buttons' }, buttons),
+    ),
+    setEnabled(enabled) {
+      buttons.forEach((button) => {
+        button.disabled = !enabled;
+      });
+    },
+  };
+}
+
+// Time spent on a question. It pauses while the app is in the background, and
+// very long times are treated as unknown, since you probably walked away.
+const MAX_TIME_MS = 10 * 60 * 1000;
+let timerTotal = 0;
+let timerStartedAt = null;
+
+function restartTimer() {
+  timerTotal = 0;
+  timerStartedAt = document.hidden ? null : performance.now();
+}
+
+function elapsedMs() {
+  return timerTotal + (timerStartedAt === null ? 0 : performance.now() - timerStartedAt);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    timerTotal = elapsedMs();
+    timerStartedAt = null;
+  } else if (timerStartedAt === null) {
+    timerStartedAt = performance.now();
+  }
+});
+
+function knownTime(ms) {
+  return ms <= MAX_TIME_MS ? Math.round(ms) : undefined;
+}
+
 // options:
 //   root        element to draw into
 //   questions   the question objects for this set, in order
@@ -12,12 +77,14 @@ import { renderQuestionBody, typeHints, typeNames } from './question-types.js';
 //   topicName   function from a topic id to its display name
 //   seed        text that keeps option order stable (the date)
 //   startIndex  optional question to open first
-//   onAnswered  called with (question, {earned, possible}) when a question is finished
+//   onAnswered  called with (question, {earned, possible}, {timeMs, confidence}) when
+//               a question is finished; timeMs is undefined when unknown
 //   onSaveProgress  called after each saved case-study part
 //   onExit      called when you leave with the X button
 //   onDone      called after the last question
 export function runQuiz(options) {
   const { root, questions, responses, topicName, seed } = options;
+  const caseProgress = new Map(); // time and confidence for case parts answered this sitting
   const answeredAll = questions.every((q) => isComplete(q, responses[q.id]));
   let index =
     options.startIndex ??
@@ -67,6 +134,7 @@ export function runQuiz(options) {
   }
 
   function navigation(primary) {
+    if (!primary && index === 0) return null;
     return h(
       'div',
       { class: 'quiz-nav' },
@@ -115,10 +183,9 @@ export function runQuiz(options) {
     const answered = isComplete(question, responses[question.id]);
     let draft = responses[question.id];
 
-    const submit = h('button', { type: 'button', class: 'button-primary', disabled: true }, 'Submit answer');
-    submit.addEventListener('click', () => {
+    const picker = confidencePicker((confidence) => {
       responses[question.id] = draft;
-      options.onAnswered(question, grade(question, draft));
+      options.onAnswered(question, grade(question, draft), { timeMs: knownTime(elapsedMs()), confidence });
       draw();
     });
 
@@ -136,14 +203,16 @@ export function runQuiz(options) {
           seed: seed + question.id,
           onChange: (value) => {
             draft = value;
-            submit.disabled = !isComplete(question, draft);
+            picker.setEnabled(isComplete(question, draft));
           },
         }),
+        answered ? null : picker.element,
       ),
       answered ? h('div', { class: 'card' }, feedback({ question, response: draft })) : null,
-      navigation(answered ? nextButton() : submit),
+      navigation(answered ? nextButton() : null),
       questionFooter(question),
     );
+    if (!answered) restartTimer();
   }
 
   function caseTabs(question) {
@@ -204,27 +273,30 @@ export function runQuiz(options) {
       primary = nextButton();
     } else {
       const part = question.parts[activeIndex];
-      primary = h(
-        'button',
-        {
-          type: 'button',
-          class: 'button-primary',
-          disabled: true,
-          onclick: () => {
-            const updated = [...saved];
-            updated[activeIndex] = draft;
-            responses[question.id] = updated;
-            if (isComplete(question, updated)) {
-              options.onAnswered(question, grade(question, updated));
-            } else {
-              options.onSaveProgress?.();
-            }
-            draw();
-            document.querySelector('.part-latest')?.scrollIntoView({ block: 'start' });
-          },
-        },
-        'Submit part',
-      );
+      const picker = confidencePicker((confidence) => {
+        const progress = caseProgress.get(question.id) ?? { totalMs: 0, confidences: [], parts: 0 };
+        progress.totalMs += elapsedMs();
+        progress.confidences.push(confidence);
+        progress.parts += 1;
+        caseProgress.set(question.id, progress);
+
+        const updated = [...saved];
+        updated[activeIndex] = draft;
+        responses[question.id] = updated;
+        if (isComplete(question, updated)) {
+          // A case counts as one answer, rated by its least sure part. Its time is
+          // known only if every part was answered in this sitting.
+          options.onAnswered(question, grade(question, updated), {
+            timeMs: progress.parts === question.parts.length ? knownTime(progress.totalMs) : undefined,
+            confidence: lowestConfidence(progress.confidences),
+          });
+        } else {
+          options.onSaveProgress?.();
+        }
+        draw();
+        document.querySelector('.part-latest')?.scrollIntoView({ block: 'start' });
+      });
+      primary = null;
       activePart = h(
         'article',
         { class: 'card question part-latest' },
@@ -237,9 +309,10 @@ export function runQuiz(options) {
           seed: partSeed(activeIndex),
           onChange: (value) => {
             draft = value;
-            primary.disabled = !isComplete(part, draft);
+            picker.setEnabled(isComplete(part, draft));
           },
         }),
+        picker.element,
       );
     }
 
@@ -259,6 +332,7 @@ export function runQuiz(options) {
       navigation(primary),
       questionFooter(question),
     );
+    if (!finished) restartTimer();
   }
 
   function draw() {

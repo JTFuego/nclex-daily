@@ -3,7 +3,8 @@
 
 import { grade, isComplete, credit } from '../js/scoring.js';
 import { addDays, daysBetween } from '../js/dates.js';
-import { currentStreak, longestStreak, dayScore, topicAccuracy } from '../js/progress.js';
+import { currentStreak, longestStreak, dayScore, topicAccuracy, tagAccuracy, weakestRow } from '../js/progress.js';
+import { TEST_PLAN, JUDGMENT_STEPS } from '../js/tags.js';
 import { pickSet } from '../js/selector.js';
 import { mergeData, dayToDoc, applyDoc, removeDay } from '../js/storage.js';
 
@@ -353,10 +354,78 @@ function checkCloudDocs(questions) {
   applyDoc(restored, date, doc2);
   check('cloud doc: attempts without a set create no day', !restored.days[date] && restored.attempts.length === 1);
 
+  // Time and confidence are stored when known, and absent (never undefined) when not.
+  const detailed = {
+    version: 1,
+    days: {},
+    attempts: [
+      { ...attempt('new', 10), timeMs: 42000, confidence: 'sure' },
+      { ...attempt('zero', 11), timeMs: 0, confidence: 'guess' },
+      { ...attempt('unknown', 12), timeMs: undefined, confidence: undefined },
+      attempt('old', 13),
+    ],
+  };
+  const detailedDoc = dayToDoc(detailed, date);
+  check(`time and confidence: storable (${firestoreProblem(detailedDoc)})`, !firestoreProblem(detailedDoc));
+  check(
+    'time and confidence: saved when known',
+    detailedDoc.attempts.new_10.timeMs === 42000 && detailedDoc.attempts.new_10.confidence === 'sure',
+  );
+  check('time and confidence: a time of 0 is kept', detailedDoc.attempts.zero_11.timeMs === 0);
+  check(
+    'time and confidence: unknown values are left out',
+    !('timeMs' in detailedDoc.attempts.unknown_12) && !('confidence' in detailedDoc.attempts.unknown_12),
+  );
+  check(
+    'time and confidence: old answers are unchanged',
+    !('timeMs' in detailedDoc.attempts.old_13) && !('confidence' in detailedDoc.attempts.old_13),
+  );
+  const detailedCopy = empty();
+  applyDoc(detailedCopy, date, detailedDoc);
+  const restoredNew = detailedCopy.attempts.find((a) => a.id === 'new');
+  check('time and confidence: survive the round trip', restoredNew.timeMs === 42000 && restoredNew.confidence === 'sure');
+  check(
+    'time and confidence: old answers still count in scores',
+    dayScore({ ids: ['old'] }, detailed.attempts, date).answered === 1 &&
+      topicAccuracy([{ id: 't', name: 'T' }], detailed.attempts)[0].attempts === 4,
+  );
+
   const bad = { version: 1, days: { nope: { ids: [], responses: {} } }, attempts: [{ id: 'a', at: 1, date: 'bad/path' }] };
   const target = empty();
   mergeData(target, bad);
   check('merge: invalid dates are rejected', target.attempts.length === 0 && !target.days.nope);
+}
+
+/* ---------- Tags ---------- */
+
+function checkTags(questions) {
+  for (const q of questions) {
+    check(`${q.id}: has a valid test plan category`, TEST_PLAN.some((t) => t.id === q.testPlan));
+    check(`${q.id}: step is valid or absent`, q.judgment === undefined || JUDGMENT_STEPS.some((s) => s.id === q.judgment));
+  }
+  for (const plan of TEST_PLAN) {
+    check(`${plan.name}: has questions to practice`, questions.some((q) => q.testPlan === plan.id));
+  }
+  for (const step of JUDGMENT_STEPS) {
+    check(`${step.name}: has questions to practice`, questions.some((q) => q.judgment === step.id));
+  }
+
+  const tags = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }];
+  const lookup = { q1: 'a', q2: 'a', q3: 'b' };
+  const attempts = [
+    { id: 'q1', earned: 1, possible: 1 },
+    { id: 'q2', earned: 1, possible: 2 },
+    { id: 'q3', earned: 0, possible: 1 },
+    { id: 'gone', earned: 1, possible: 1 },
+  ];
+  const rows = tagAccuracy(tags, attempts, (attempt) => lookup[attempt.id]);
+  check('tag accuracy: averages credit', rows[0].percent === 75 && rows[0].attempts === 2 && rows[0].missed === 1);
+  check('tag accuracy: no data is null, not zero', rows[2].percent === null && rows[2].attempts === 0);
+  check('tag accuracy: unknown questions are ignored', rows.reduce((sum, row) => sum + row.attempts, 0) === 3);
+  check('tag accuracy: a new account has no errors', tagAccuracy(tags, [], () => 'a').every((row) => row.percent === null));
+  check('weakest row: picks the lowest', weakestRow(rows, 1).id === 'b');
+  check('weakest row: ignores rows with few answers', weakestRow(rows, 2).id === 'a');
+  check('weakest row: empty when nothing qualifies', weakestRow(rows, 5) === null);
 }
 
 /* ---------- Run ---------- */
@@ -375,6 +444,7 @@ async function run() {
     checkSelector(topics, questions);
     checkMerge();
     checkCloudDocs(questions);
+    checkTags(questions);
 
     const counts = (key) =>
       Object.entries(

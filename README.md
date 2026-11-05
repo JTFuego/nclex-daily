@@ -55,7 +55,7 @@ After any edit, open <http://localhost:8000/tests/>. It reports typos in the for
 | `highlight` | `"segments": [...]`, `"answer": [0, 2]` |
 | `case` | `"tabs": [{ "label", "text" }]`, `"parts"` holds questions of the types above |
 
-Every question also needs `id`, `topic`, `subtopic`, `type`, `stem`, and `rationale`.
+Every question also needs `id`, `topic`, `subtopic`, `testPlan`, `type`, `stem`, and `rationale`, and can have a `judgment` step. The allowed tag values are in `js/tags.js`, and [TAGS.md](TAGS.md) explains how they were assigned.
 
 To add a new topic, add it to `data/topics.json` and create `data/questions/<topic-id>.json`. To add a new question type, add one entry to `grading` in `js/scoring.js` and one to `renderers` in `js/question-types.js`.
 

@@ -21,11 +21,13 @@ import { toDateKey, addDays, formatDate } from './dates.js';
 import { pickSet } from './selector.js';
 import { runQuiz } from './quiz.js';
 import { credit, isComplete } from './scoring.js';
-import { currentStreak, longestStreak, dayScore, topicAccuracy } from './progress.js';
+import { currentStreak, longestStreak, dayScore, topicAccuracy, tagAccuracy, weakestRow } from './progress.js';
+import { TEST_PLAN, JUDGMENT_STEPS } from './tags.js';
 
 const DAILY_COUNT = 20;
 const EXTRA_COUNT = 10;
 const CHART_DAYS = 14;
+const MIN_ANSWERS_FOR_WEAKEST = 5;
 
 // Topic status flags: under WEAK_BELOW is red, under STRONG_FROM is yellow, the rest green.
 const WEAK_BELOW = 65;
@@ -90,9 +92,9 @@ async function loadQuestions() {
   questionsById = new Map(files.flat().map((q) => [q.id, q]));
 }
 
-function recordAnswer(question, result, date, mode) {
+function recordAnswer(question, result, date, mode, { timeMs, confidence }) {
   const data = load();
-  data.attempts.push({
+  const attempt = {
     id: question.id,
     topic: question.topic,
     date,
@@ -100,7 +102,11 @@ function recordAnswer(question, result, date, mode) {
     earned: result.earned,
     possible: result.possible,
     mode,
-  });
+  };
+  // Older answers don't have these, so everything treats them as optional.
+  if (timeMs !== undefined) attempt.timeMs = timeMs;
+  if (confidence) attempt.confidence = confidence;
+  data.attempts.push(attempt);
   save();
 }
 
@@ -133,8 +139,8 @@ function startDaily(startIndex) {
     topicName,
     seed: today,
     startIndex,
-    onAnswered: (question, result) => {
-      recordAnswer(question, result, today, 'daily');
+    onAnswered: (question, result, details) => {
+      recordAnswer(question, result, today, 'daily', details);
       const finished = questionsFor(day.ids).every((q) => isComplete(q, day.responses[q.id]));
       if (finished && !day.completedAt) {
         day.completedAt = Date.now();
@@ -150,11 +156,12 @@ function startDaily(startIndex) {
 
 /* ---------- Extra practice ---------- */
 
-function startExtra() {
+// `match`, when given, limits the set to questions it accepts, such as one category.
+function startExtra(match = null) {
   const data = load();
   const today = toDateKey();
   const ids = pickSet({
-    questions: [...questionsById.values()],
+    questions: [...questionsById.values()].filter((q) => !match || match(q)),
     topics,
     attempts: data.attempts,
     today,
@@ -164,6 +171,20 @@ function startExtra() {
   });
   const questions = questionsFor(ids);
   const results = new Map();
+  if (!questions.length) {
+    leaveHome();
+    show(
+      root,
+      h(
+        'section',
+        { class: 'card' },
+        h('h2', {}, 'No questions available'),
+        h('p', { class: 'muted' }, 'All the questions here are in today’s set. Finish it first, then try again tomorrow.'),
+        h('button', { type: 'button', class: 'button-primary', onclick: drawHome }, 'Back'),
+      ),
+    );
+    return;
+  }
   leaveHome();
   runQuiz({
     root,
@@ -171,12 +192,12 @@ function startExtra() {
     responses: {}, // extra sets aren't resumable, but every answer still counts
     topicName,
     seed: `${today}extra${Date.now()}`,
-    onAnswered: (question, result) => {
+    onAnswered: (question, result, details) => {
       results.set(question.id, result);
-      recordAnswer(question, result, today, 'extra');
+      recordAnswer(question, result, today, 'extra', details);
     },
     onExit: drawHome,
-    onDone: () => drawExtraResults(questions, results),
+    onDone: () => drawExtraResults(questions, results, match),
   });
 }
 
@@ -248,7 +269,7 @@ function drawResults(date) {
   );
 }
 
-function drawExtraResults(questions, results) {
+function drawExtraResults(questions, results, match) {
   const answered = questions.filter((q) => results.has(q.id));
   const total = answered.reduce((sum, q) => sum + credit(results.get(q.id)), 0);
   const percent = answered.length ? Math.round((total / answered.length) * 100) : 0;
@@ -265,7 +286,7 @@ function drawExtraResults(questions, results) {
     h(
       'div',
       { class: 'button-row' },
-      h('button', { type: 'button', class: 'button-secondary', onclick: startExtra }, 'More practice'),
+      h('button', { type: 'button', class: 'button-secondary', onclick: () => startExtra(match) }, 'More practice'),
       h('button', { type: 'button', class: 'button-primary', onclick: drawHome }, 'Done'),
     ),
   );
@@ -344,7 +365,7 @@ function todayCard(data, today) {
       'div',
       { class: 'button-row' },
       h('button', { type: 'button', class: 'button-secondary', onclick: () => startDaily(0) }, 'Review answers'),
-      h('button', { type: 'button', class: 'button-primary', onclick: startExtra }, `Practice ${EXTRA_COUNT} more`),
+      h('button', { type: 'button', class: 'button-primary', onclick: () => startExtra() }, `Practice ${EXTRA_COUNT} more`),
     ),
   );
 }
@@ -509,6 +530,80 @@ function topicTable(data) {
   );
 }
 
+function tagRow(row, match) {
+  return h(
+    'li',
+    { class: `tag-row ${row.attempts ? '' : 'is-empty'}` },
+    h(
+      'div',
+      { class: 'tag-row-text' },
+      h('span', { class: 'topic-name' }, row.name),
+      h(
+        'span',
+        { class: 'topic-count' },
+        row.attempts ? `${row.attempts} answered, ${row.missed} missed` : 'No answers yet',
+      ),
+    ),
+    h('span', { class: 'tag-row-percent' }, row.percent !== null ? `${row.percent}%` : '–'),
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'button-small',
+        'aria-label': `Practice ${row.name}`,
+        onclick: () => startExtra(match),
+      },
+      'Practice',
+    ),
+  );
+}
+
+const questionOf = (attempt) => questionsById.get(attempt.id);
+
+function coverageCard(data) {
+  const rows = tagAccuracy(TEST_PLAN, data.attempts, (a) => questionOf(a)?.testPlan);
+  // Subcategories sit under their parent category; two categories have none.
+  const groups = [];
+  for (const row of rows) {
+    const last = groups[groups.length - 1];
+    if (row.group && last?.name === row.group) last.rows.push(row);
+    else groups.push({ name: row.group, rows: [row] });
+  }
+  return h(
+    'section',
+    { class: 'card' },
+    h('h2', {}, 'Test plan coverage'),
+    h(
+      'p',
+      { class: 'muted chart-subtitle' },
+      'How much you’ve answered in each area, to help you spot gaps. Practice sets count toward accuracy, not your daily score.',
+    ),
+    groups.map((group) => [
+      group.name ? h('h3', { class: 'tag-group' }, group.name) : null,
+      h('ul', { class: 'tag-rows' }, group.rows.map((row) => tagRow(row, (q) => q.testPlan === row.id))),
+    ]),
+  );
+}
+
+function judgmentCard(data) {
+  const rows = tagAccuracy(JUDGMENT_STEPS, data.attempts, (a) => questionOf(a)?.judgment);
+  const weakest = weakestRow(rows, MIN_ANSWERS_FOR_WEAKEST);
+  return h(
+    'section',
+    { class: 'card' },
+    h('h2', {}, 'Clinical judgment'),
+    h(
+      'p',
+      { class: 'chart-subtitle' },
+      weakest
+        ? h('strong', {}, `You miss ${weakest.name} most, at ${weakest.percent}% accuracy.`)
+        : h('span', { class: 'muted' }, `Answer at least ${MIN_ANSWERS_FOR_WEAKEST} questions in a step to see which one you miss most.`),
+    ),
+    h('ul', { class: 'tag-rows' }, rows.map((row) => tagRow(row, (q) => q.judgment === row.id))),
+    h('p', { class: 'muted chart-subtitle' }, 'Questions that mainly test recall aren’t counted here.'),
+  );
+}
+
 function accountCard() {
   const message = h('p', { class: 'banner banner-bad', role: 'alert', hidden: true });
   const showError = (text) => {
@@ -667,7 +762,14 @@ function backupCard() {
 
 const tabPanels = {
   today: (data, today) => [todayCard(data, today)],
-  progress: (data, today) => [statTiles(data, today), scoreChart(data, today), accountCard(), backupCard()],
+  progress: (data, today) => [
+    statTiles(data, today),
+    scoreChart(data, today),
+    coverageCard(data),
+    judgmentCard(data),
+    accountCard(),
+    backupCard(),
+  ],
   topics: (data) => [topicTable(data)],
 };
 
